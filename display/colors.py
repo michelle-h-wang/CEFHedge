@@ -1,0 +1,39 @@
+BLUE = '#1B84ED'
+PINK = '#CF7DFF'
+DARK_GREY = '#616161'
+DARK_ORANGE = '#FF5A00'
+TEAL = '#00D3D6'
+GREEN = '#008616'
+FUCHSIA = '#B31D83'
+RED = '#FF1E3E'
+LIGHT_ORANGE = '#FF9E24'
+LIGHT_BLUE = '#63B2FF'
+LIGHT_GREEN = '#30C030'
+WHITE = '#FFFFFF'
+
+
+COLORS = [
+    WHITE,
+    BLUE,
+    PINK,
+    DARK_ORANGE,
+    TEAL,
+    GREEN,
+    FUCHSIA,
+    RED,
+    LIGHT_ORANGE,
+    LIGHT_BLUE,
+    LIGHT_GREEN,
+    '#9B016A',
+    '#FD5D5D',
+    '#AAAAAA',
+    '#FBE360',
+    '#00A5E3',
+    '#35B56C',
+    '#AC1BE8',
+    '#007575',
+    '#D20000',
+    '#1E6AB4',
+    '#89A4C5',
+    '#626262'
+]
