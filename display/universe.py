@@ -16,6 +16,7 @@ from display.factor import (
     corr_list_sorted,
     get_top_corr,
     get_data,
+    get_daily_px,
     lin_reg,
     mse,
     make_splits,
@@ -40,29 +41,44 @@ class Fund():
         self.top_h = None
         
         
-    def _cef_list(self): #list
+    def _cef_list(self): 
+        """
+        @return & initializes list of holdings in CEF, as bbg tickers
+        """
         if self.cef_list is None:
             self.cef_list = get_members(bq.univ.holdings(self.CEF_TCK))
         return self.cef_list
     
-    def _cef_pct_chg_df(self): #dataframe
+    def _cef_pct_chg_df(self):
+        """
+        @return & initializes pd.Dataframe of CEF NAV % daily change values
+        """
         if self.cef_pct_chg_df is None:
             self.cef_pct_chg_df = get_NAV_chg(self.CEF_TCK, self.startdate, self.enddate)
         return self.cef_pct_chg_df
         
-    def _cef_pct_chg(self): # numpy array
+    def _cef_pct_chg(self):
+        """
+        @return & initializes np.array of CEF NAV % daily change values
+        """
         if self.cef_pct_chg is None:
             df = self._cef_pct_chg_df()
-            self.cef_pct_chg = df["PCT_DIFF(FUND_NET_ASSET_VAL(dates=RANGE(start=" + self.startdate + ",end=" + self.enddate + ")))"].values
+            self.cef_pct_chg = df["PCT_DIFF(FUND_NET_ASSET_VAL(dates=RANGE(start=" + self.startdate + ",end=" + self.enddate + "),currency='USD'))"].values
             self.correct_len = self.cef_pct_chg.shape[0]
         return self.cef_pct_chg
     
-    def length(self): #int
+    def length(self):
+        """
+        @return & initializes int: correct len data should be
+        """
         if self.correct_len is None:
             self.correct_len = self._cef_pct_chg().shape[0]
         return self.correct_len
     
     def _chg_dict(self): #dict
+        """
+        @return & initializes dict of each holding and its corresponding price changes
+        """
         if self.chg_dict is None:
             cef_list = self._cef_list()
             cef_pct_chg = self._cef_pct_chg()
@@ -70,6 +86,9 @@ class Fund():
         return self.chg_dict
     
     def _corr_df(self):
+        """
+        @return & initializes correlation matrix between CEF and holdings
+        """
         if self.corr_df is None:
             chg = self._chg_dict()
             chg_df = pd.DataFrame(data=chg)
@@ -77,13 +96,16 @@ class Fund():
         return self.corr_df
     
     def _top_corr(self, topnum):
+        """
+        @return & initializes {topnum} correlated holdings as dict
+        """
         if self.top_h is None:
             self.top_h = get_top_corr(self._corr_df(), topnum, self.CEF_TCK)
         return self.top_h
               
     def display_fund_assets(self):
         """
-        @ returns displayable section of datafram
+        @returns displayable section of datafram
         """
         s = 'FUND HOLDINGS \n'
         for h in self._cef_list():
@@ -93,6 +115,9 @@ class Fund():
 
     
     def plot_nav_chg(self):
+        """
+        @returns plt figure of CEF NAV change plotted
+        """
         fig = plt.figure(figsize=(WINDOW,WINDOW))
         plt.plot(self._cef_pct_chg_df()['DATE'], self._cef_pct_chg())
         plt.xlabel('dates')
@@ -104,6 +129,9 @@ class Fund():
         
         
     def plot_indiv_price_chg(self):
+        """
+        @returns plt figure of each holding's price changes plotted
+        """
         plt.rcParams.update({'font.size': 4})
         x = math.ceil(len(self._cef_list())**.5)
         fig = plt.figure(figsize=(x*4,x*4))
@@ -122,6 +150,9 @@ class Fund():
         return fig
     
     def plot_heatmap(self):
+        """
+        plots heatmap viz of correlations
+        """
         fig = plt.figure(figsize=(WINDOW, WINDOW)).set_dpi(150)
         sns.heatmap(self.corr_df)
         plt.show()
@@ -150,9 +181,6 @@ class Eq():
         s = ''
         for eq in self.eq:
             s += '<div>' + eq + '</div>' 
-        # for i in range(20):
-        #     s += self.eq[i] + '\n'
-        # s += ' ... \n total ' + str(len(self.eq))
         return s
         
 
@@ -181,9 +209,6 @@ class Etf():
             s += '<div>' + etf + '</div>' 
         for etf in self.etfs2:
             s += '<div>' + etf + '</div>' 
-        # for i in range():
-        #     s += self.etfs1[i] + '\n' + self.etfs2[i] + '\n'
-        # s += ' ... \n total ' + str(len(self.etfs1) + len(self.etfs2))
         return s
                                          
                                          

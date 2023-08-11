@@ -19,6 +19,7 @@ from display.factor import (
     corr_list_sorted,
     get_top_corr,
     get_data,
+    get_daily_px,
     lin_reg,
     mse,
     make_splits,
@@ -156,11 +157,22 @@ class MainDashboard():
             style = {'description_width': 'initial'}
         )
         
+        self.widgets['epsilon'] = widgets.IntText(
+            value = 5,
+            description= "Epsilon (as %)",
+            disabled = False,
+            layout={
+                'margin': '14px 0px 0px 0px',
+                'width': '100%'
+            },
+            style = {'description_width': 'initial'}
+        )
+        
         self.widgets['n_splits'] = widgets.IntSlider(
             value = 10,
             min = 5,
-            max = 30,
-            step = 5,
+            max = 15,
+            step = 1,
             description= "Number of splits:",
             disabled = False,
             continuous_update = False,
@@ -173,6 +185,7 @@ class MainDashboard():
             },
             style = {'description_width': 'initial'}
         )
+        
         # right panel
         self.widgets['update_corr_plot_holding'] = widgets.Button(
             description = 'Update top holdings',
@@ -324,11 +337,12 @@ class MainDashboard():
                         [self.widgets['start_date'], self.widgets['end_date']]),
                     self.widgets['TOPNUM'], 
                     self.widgets['n_splits'],
+                    self.widgets['epsilon'],
                     widgets.HBox([self.widgets['update_main_plot'], self._spinner])
                 ]),
                 widgets.VBox([
                     widgets.HTML("UNIV ={ETFs in the US with total assets >= 150M, Equities with 20d traded value >= 1M in the US, and assets in the fund itself}."),
-                    widgets.HTML("- \'start date\', \'end date\' should be in the following format: \"-3M\", \"0D\", \"4Y\" etc. The following will not work: \"-3m\" \"0\" \"4years\". "),
+                    widgets.HTML("- \'start date\', \'end date\' should be in the following format: \"-3M\", \"0D\", \"2020-03-28\" etc. The following will not work: \"-3m\" \"0\" \"4years\". "),
                     widgets.HTML("- Fund Ticker can be changed to any bbg ticker, it must be a fund."),
                     widgets.HTML("- \"how many assets to use\" refers to how many assets you ultimately want in the model. If num=3, the algo will find the top 3 tickers in the universe above for the highest 3 correlations to the fund's NAV changes."),
                     widgets.HTML("- \"Number of cross-validation splits\" is how many different splits of the data to be used during cross-validation of the linear regression model. Any number works here, except 0, 1, default value 10.")
@@ -429,6 +443,7 @@ class MainDashboard():
             self.cef = Fund(self.widgets['fund_input'].value, self.start_date, self.end_date)
             self.topnum = self.widgets['TOPNUM'].value
             self.n_splits = self.widgets['n_splits'].value
+            self.eps = self.widgets['epsilon'].value/100
             
             # draw app
             self._spinner.text = "Building visualizations..."
@@ -463,6 +478,83 @@ class MainDashboard():
             self._logger.log_message(e, color='red')
             self._spinner.stop()
     
+    def gd_XY(self, sortedtop):
+        """
+        @returns X,Y matrices for gradient descent (model method 2)
+        """
+        X_gd = get_daily_px(sortedtop[0][0], self.start_date, self.end_date) #(d,n)
+        seen = [sortedtop[0][0]]
+        n = X_gd.shape[0]
+        
+        i=1
+        for tup in sortedtop:
+            if tup[0] in seen: continue
+            else:
+                i += 1
+                arr = get_daily_px(tup[0], self.start_date, self.end_date)
+                arr = np.resize(arr, (n,1)).T
+                X_gd = np.vstack((arr, X_gd))
+                seen.append(tup[0])
+                if i == self.topnum:
+                    break
+           
+        X2 = (X_gd[:,1:])
+
+        X1 = X_gd *(1+ np.resize(self.cef._cef_pct_chg(), (n,1)).T)
+        X1 = X1[:,:-1]        
+
+        Xaug = X1 - X2
+        
+        # GET ORIGINAL FUND NAV VALUES
+        req = bql.Request(self.cef.CEF_TCK, bq.data.fund_net_asset_val(dates=bq.func.range(start=self.start_date , end=self.end_date), fill='prev', currency='USD'))
+        res = bq.execute(req)
+        NAV = res[0].df()["FUND_NET_ASSET_VAL(fill='prev',dates=RANGE(start=" + self.start_date + ",end=" + self.end_date + "),currency='USD')"].values
+        NAV = np.resize(NAV, (n, 1)) #nx1
+        return Xaug, NAV, X_gd # (TOPNUM, n), (n, 1), (TOPNUM, n)
+    
+    def linreg_XY(self, sortedtop):
+        """
+        @returns X,Y matrices for linear regression model (model method 1)
+        """
+        X = get_data(sortedtop[0]) # (n,)
+        n = X.shape[0]
+        seen = [sortedtop[0][0]]
+        i=1
+        
+        for tup in sortedtop:
+            if tup[0] in seen:
+                continue
+            else:
+                i+=1
+                X = np.vstack((X, get_data(tup))) # (d, n)
+                seen.append(tup[0])
+                if i == self.topnum:
+                    break
+         
+        Y = np.resize(self.cef._cef_pct_chg(), (n, 1)) #nx1
+        return X,Y
+    
+    def grad_desc(self, X, lam, eps):
+        """
+        @returns: np.array of size(TOPNUM,1) containing optimal coefficients gradient descent initialized to (1,1,..), no offset.
+        """
+        thnew = np.ones((self.topnum,1)) #*(1/TOPNUM)
+        obj = float('inf')
+        
+        i=0
+        while obj > eps:
+            i+=1
+            th = thnew
+            gd = 2/self.n * X@(th.T@X).T + 2*lam*th
+            
+            thnew = th - (1/i)*(gd/np.sum(gd))
+            if np.any(thnew < 0):
+                thnew = th
+                break
+            thnew /= (np.sum((thnew)))
+            obj = (np.mean((th.T@X)**2) - np.mean((thnew.T@X)**2))/np.mean((th.T@X)**2)
+            print(f'step {i}: \n th_init = {th.T} \n gradient descent = {gd.T/np.sum(gd)} \n error decreased by = {obj}')
+        return thnew
     
     def get_model(self, *args):
         if not self.widgets['top_etf_plot'].children or not self.widgets['top_eq_plot'].children or not self.widgets['top_holding_plot'].children:
@@ -480,96 +572,146 @@ class MainDashboard():
         alltop.extend(etf)
         sortedtop = [tup for tup in sorted(alltop, key=lambda item: item[1], reverse=True)]
         
+        ####################################################################
+        # LINEAR REGRESSION MODEL
         # build X, Y matrices for linear regression
-        self.X = get_data(sortedtop[0]) # (n,)
-        self.n = self.X.shape[0]
-        seen = [sortedtop[0][0]]
-        i=1
+        self.lr_X, self.lr_Y = self.linreg_XY(sortedtop)
+        self.n = self.lr_X.shape[0]
+        # cross - validate, find optimal lambda, coefficients
         
-        for tup in sortedtop:
-            if tup[0] in seen:
-                continue
-            else:
-                i+=1
-                self.X = np.vstack((self.X, get_data(tup))) # (d, n)
-                seen.append(tup[0])
-                if i == self.topnum:
-                    break
-            
-        self.Y = np.resize(self.cef._cef_pct_chg(), (self.n, 1)) #nx1
-        # cross - validate
-
-        errors = []
-        coeff = []
+        lr_errors = []
+        self.lr_err, self.lr_lam, self.lr_th = float('inf'), None, None
         for lam in self.lams:
-            th, th_0 = lin_reg(self.X, self.Y, lam)
-            coeff.append((th, th_0))
-            err = cross_validate(self.X, self.Y, self.n_splits, lam, lin_reg, mse)
-            errors.append(err)
-            
-        # find optimal lambda, coefficients
-        self.minerr, self.minlam, self.optths = float('inf'), None, None
-        for lam, err, ths in zip(self.lams, errors, coeff):
-            if err < self.minerr:
-                self.minerr, self.minlam, self.optths = err, lam, ths
-        self.th, self.th_0 = self.optths
-        s = f'<div> optimal lambda: {str(self.minlam)} </div> <div> min testing error: {str(self.minerr)} </div> <div> linear regression coefficients: </div> <div> {np.array2string(self.th)} </div> <div> {str(self.th_0)} </div>'
-        # model
-        self.Y_hat = self.th.T@self.X + self.th_0
-        self.model = str(round(self.th[0][0], 2)) + '  ' + sortedtop[0][0]
-        for i in range(1,self.topnum):
-            self.model +=  ' + ' + str(round(self.th[i][0],2)) + '  ' + sortedtop[i][0] 
-           
-        reg_plot = widgets.Output()
-        with reg_plot:
-            reg_plot.clear_output()
-            self.plot_cross_valid(self.lams, errors)
-            
-        yhat_plot = widgets.Output()
-        with yhat_plot:
-            yhat_plot.clear_output()
-            self._update_yhat_plot()
-            
-        err_plot = widgets.Output()
-        with err_plot:
-            err_plot.clear_output()
-            self._update_err_plot()
-            
-        self.widgets['reg_plot'].children = [reg_plot, widgets.HTML(s)]
-        self.widgets['model'].children = [widgets.Label('HEDGE BASKET: '), widgets.HTML(self.model), yhat_plot, err_plot]
+            th = lin_reg(self.lr_X, self.lr_Y, lam)
+            err = cross_validate(self.lr_X, self.lr_Y, self.n_splits, lam, lin_reg, mse)
+            lr_errors.append(err)
+            if err < self.lr_err:
+                self.lr_err, self.lr_lam, self.lr_th = err, lam, th
         
+        opt_lr_reg = f'<div> optimal lambda: {str(self.lr_lam)} </div> <div> min testing error: {str(self.lr_err)} </div> <div> linear regression coefficients: </div> <div> {np.array2string(self.lr_th)} </div>'
+        # model
+        self.lr_Y_hat = self.lr_th.T@self.lr_X
+        self.linreg_model = str(round(self.lr_th[0][0], 2)) + '  ' + sortedtop[0][0]
+        for i in range(1,self.topnum):
+            self.linreg_model +=  ' + ' + str(round(self.lr_th[i][0],2)) + '  ' + sortedtop[i][0] 
+        
+        #plots
+        lr_reg_plot, lr_yhat_plot, lr_err_plot = widgets.Output(), widgets.Output(), widgets.Output()
+        with lr_reg_plot:
+            lr_reg_plot.clear_output()
+            self.plot_cross_valid(self.lams, lr_errors)
+            
+        with lr_yhat_plot:
+            lr_yhat_plot.clear_output()
+            self._update_LR_yhat_plot()
+            
+        with lr_err_plot:
+            lr_err_plot.clear_output()
+            self._update_LR_err_plot()
+        
+        ####################################################################    
+        # GRADIENT DESCENT
+        self.X_gd, self.NAV, self.X_gd_orig = self.gd_XY(sortedtop)
+        #choose reg
+        self.gd_lam, self.gd_th, self.gd_err = None, None, float('inf')
+        gd_errors = []
+        for lam in self.lams:
+            th = self.grad_desc(self.X_gd, lam, self.eps)
+            err = np.mean((th.T@self.X_gd)**2)
+            gd_errors.append(err)
+            if err <= self.gd_err:
+                self.gd_lam, self.gd_th, self.gd_err = lam, th, err
+        opt_gd_reg = f'<div> optimal lambda: {str(self.gd_lam)} </div> <div> min testing error: {str(self.gd_err)} </div> <div> linear regression coefficients: </div> <div> {np.array2string(self.gd_th)} </div>'
+        self.gd_Y_hat = self.gd_th.T@self.X_gd
+        self.gd_Y_hat_chg = (self.gd_th.T@self.X_gd_orig[:,1:] - self.gd_th.T@self.X_gd_orig[:,:-1])/(self.gd_th.T@self.X_gd_orig[:,:-1])
+        self.gd_model = str(round(self.gd_th[0][0], 2)) + '  ' + sortedtop[0][0]
+        for i in range(1,self.topnum):
+            self.gd_model +=  ' + ' + str(round(self.gd_th[i][0],2)) + '  ' + sortedtop[i][0] 
+        #plots
+        gd_reg_plot, gd_yhat_plot, gd_err_plot = widgets.Output(), widgets.Output(), widgets.Output()
+        with gd_reg_plot:
+            gd_reg_plot.clear_output()
+            self.plot_gd_reg(self.lams, gd_errors)
+            
+        with gd_yhat_plot:
+            gd_yhat_plot.clear_output()
+            self._update_gd_yhat_plot()
+            
+        with gd_err_plot:
+            gd_err_plot.clear_output()
+            self._update_gd_err_plot()
+        ########################################################################
+        self.widgets['linreg-model'] = widgets.VBox(
+            [widgets.Label('METHOD 1 HEDGE BASKET: '), widgets.HTML(self.linreg_model), lr_yhat_plot, lr_err_plot], layout ={'border': 'solid'})
+        
+        self.widgets['gd-model'] = widgets.VBox([
+            widgets.Label('METHOD 2 HEDGE BASKET: '), widgets.HTML(self.gd_model), gd_yhat_plot, gd_err_plot
+        ], layout = {'border': 'solid'})
+        
+        self.widgets['reg_plot'].children = [widgets.Label('LINEAR REGRESSION MODEL'), lr_reg_plot, widgets.HTML(opt_lr_reg), widgets.Label('GRADIENT DESCENT MODEL'), gd_reg_plot, widgets.HTML(opt_gd_reg)]
+        self.widgets['model'].children = [self.widgets['linreg-model'], self.widgets['gd-model']]
         self.model_spinner.stop()
 
     def plot_cross_valid(self, lams, errors):
-            fig = plt.figure(figsize=(WINDOW, WINDOW))
-            plt.title("Cross-Validation Error from Linear Regression with Different Lambdas", fontweight="bold")
-            plt.xlabel("lamda")
-            plt.ylabel("Mean Squared Error")
-            plt.plot(lams, errors)
-            plt.show()
-            return fig
+        fig = plt.figure(figsize=(WINDOW, WINDOW))
+        plt.title("Cross-Validation Error from Linear Regression with Different Lambdas", fontweight="bold")
+        plt.xlabel("lamda")
+        plt.ylabel("Mean Squared Error")
+        plt.plot(lams, errors)
+        plt.show()
+        return fig
         
-    def _update_yhat_plot(self):
+    def _update_LR_yhat_plot(self):
         fig = plt.figure(figsize=(WINDOW, WINDOW))
         plt.title("Modeled NAV Changes vs. Actual NAV Changes", fontweight="bold")
-        plt.text(.2, .6, 'MSE: ' + str(self.minerr) + '\nRegularization: '+ str(self.minlam) + '\n \nmodel: \n' + self.model,transform=plt.gca().transAxes)
-        plt.plot(self.cef._cef_pct_chg_df()['DATE'], self.Y_hat.T, label = "Modeled NAV")
-        plt.plot(self.cef._cef_pct_chg_df()['DATE'], self.Y, label = "Actual NAV")
+        plt.text(.2, .6, 'MSE: ' + str(self.lr_err) + '\nRegularization: '+ str(self.lr_lam) + '\n \nmodel: \n' + self.linreg_model,transform=plt.gca().transAxes)
+        plt.plot(self.cef._cef_pct_chg_df()['DATE'], self.lr_Y_hat.T, label = "Modeled NAV")
+        plt.plot(self.cef._cef_pct_chg_df()['DATE'], self.lr_Y, label = "Actual NAV")
         plt.legend()
         plt.tick_params(axis='x', rotation=70)
         plt.show()
         return fig
     
-    def _update_err_plot(self):
+    def _update_LR_err_plot(self):
         fig = plt.figure(figsize=(WINDOW, WINDOW))
         plt.title("Model Error", fontweight="bold")
-        plt.text(.2, .6, 'MSE: ' + str(self.minerr) + '\nRegularization: '+ str(self.minlam) + '\n \nmodel: \n' + self.model,transform=plt.gca().transAxes)
-        e = self.Y_hat.T-self.Y
+        plt.text(.2, .6, 'MSE: ' + str(self.lr_err) + '\nRegularization: '+ str(self.lr_lam) + '\n \nmodel: \n' + self.linreg_model,transform=plt.gca().transAxes)
+        e = self.lr_Y_hat.T-self.lr_Y
         plt.tick_params(axis='x', rotation=70)
         plt.plot(self.cef._cef_pct_chg_df()['DATE'], e)
         plt.show()
         return fig
 
+    def plot_gd_reg(self, lams, errors):
+        fig=plt.figure(figsize=(WINDOW, WINDOW))
+        plt.title("Error from Gradient Descent for each Regularization Hyperparameter")
+        plt.xlabel("lambda")
+        plt.ylabel("Variance")
+        plt.plot(lams, errors)
+        plt.show()
+        return fig
+        
+    def _update_gd_yhat_plot(self):
+        fig=plt.figure(figsize=(WINDOW, WINDOW))
+        plt.title("Modeled NAV Changes vs. Actual NAV Changes", fontweight="bold")
+        plt.text(.2, .6, 'Variance: ' + str(self.gd_err) + '\n \nmodel: \n' + self.gd_model,transform=plt.gca().transAxes)
+        plt.plot(self.cef._cef_pct_chg_df()['DATE'][:-1], self.gd_Y_hat_chg.T, label = 'Deviance from NAV')
+        plt.plot(self.cef._cef_pct_chg_df()['DATE'][:-1], self.cef._cef_pct_chg()[:-1], label = 'Actual NAV')
+        plt.legend()
+        plt.tick_params(axis='x', rotation=70)
+        plt.show()
+        return fig
+    
+    def _update_gd_err_plot(self):
+        fig = plt.figure(figsize=(WINDOW, WINDOW))
+        plt.title("Model Error", fontweight="bold")
+        plt.text(.2, .6, 'Variance: ' + str(self.gd_err) + '\n \nmodel: \n' + self.gd_model,transform=plt.gca().transAxes)
+        x = self.gd_Y_hat_chg.shape[1]
+        e = abs(self.gd_Y_hat_chg.T - np.resize(self.cef._cef_pct_chg()[1:], (x,1)))
+        plt.tick_params(axis='x', rotation=70)
+        plt.plot(self.cef._cef_pct_chg_df()['DATE'][:-1], e)
+        plt.show()
+        return fig
     
     """left panel"""
     def _update_etf(self, *args):
